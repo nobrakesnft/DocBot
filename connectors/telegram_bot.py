@@ -1,6 +1,7 @@
 """
 Telegram Bot Connector
 Handles Telegram-specific message handling using the shared brain.
+Self-explanatory UX - anyone can use it without coding knowledge.
 """
 
 import os
@@ -10,7 +11,7 @@ import logging
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -45,53 +46,156 @@ class TelegramBot:
             return f"telegram_{chat.id}"
         return "default"
 
+    def _get_doc_count(self, project_id: str) -> int:
+        """Get document count for a project."""
+        return self.vector_store.count(project_id)
+
+    def _get_suggested_questions(self, project_id: str) -> str:
+        """Generate suggested questions based on loaded docs."""
+        doc_count = self._get_doc_count(project_id)
+        if doc_count == 0:
+            return ""
+
+        return """
+💡 Try asking:
+• "How do I get started?"
+• "What are the tokenomics?"
+• "How does staking work?"
+• Or ask anything about the project!"""
+
+    # =========================================================================
+    # WELCOME & HELP
+    # =========================================================================
+
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command."""
-        welcome_message = """Welcome to DocBot! I answer questions based on project docs.
+        """Handle /start command - friendly onboarding."""
+        project_id = self._get_project_id(update.message.chat)
+        doc_count = self._get_doc_count(project_id)
+        chat_type = update.message.chat.type
 
-User Commands:
-/ask <question> - Ask a question
-/status - Check bot status
+        if chat_type in ["group", "supergroup"]:
+            # Group welcome
+            welcome = f"""👋 Hey! I'm DocBot - your AI documentation assistant!
 
-Admin Commands:
-/docs_info - Show loaded docs info
-/load_text <text> - Add text to knowledge base
-/load_url <url> - Load docs from URL
-/clear_docs - Clear docs for this chat
-/reload - Reload docs from folder
+I answer questions based on your project's docs, so your community gets instant help 24/7.
 
-Or just upload a file (.txt, .md, .pdf)!
-        """
-        await update.message.reply_text(welcome_message)
+📊 Current Status: {doc_count} document chunks loaded
+
+"""
+            if doc_count == 0:
+                welcome += """🚀 QUICK SETUP (Admins):
+1️⃣ Drop a file here (.txt, .md, or .pdf)
+2️⃣ Or use: /load_url https://your-docs-site.com
+
+Once docs are loaded, anyone can ask questions!
+"""
+            else:
+                welcome += """✅ I'm ready to answer questions!
+
+Just type your question or use /ask <question>
+"""
+                welcome += self._get_suggested_questions(project_id)
+
+        else:
+            # DM welcome
+            welcome = f"""👋 Hey! I'm DocBot - your AI documentation assistant!
+
+I answer questions based on project documentation.
+
+📊 Status: {doc_count} document chunks loaded
+
+"""
+            if doc_count == 0:
+                welcome += """📄 To get started:
+• Send me a document file (.txt, .md, .pdf)
+• Or use: /load_url https://docs-site.com
+• Or use: /load_text <paste your text here>
+
+Then just ask me questions!
+"""
+            else:
+                welcome += """Just send me your question and I'll find the answer!
+"""
+                welcome += self._get_suggested_questions(project_id)
+
+        welcome += """
+Type /help for all commands."""
+
+        await update.message.reply_text(welcome)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /help command."""
-        await self.start_command(update, context)
+        """Handle /help command - clear, categorized help."""
+        project_id = self._get_project_id(update.message.chat)
+        doc_count = self._get_doc_count(project_id)
+
+        help_text = """📚 DOCBOT HELP
+
+━━━ FOR EVERYONE ━━━
+• Just type your question - I'll answer it!
+• /ask <question> - Ask a specific question
+• /status - Check if docs are loaded
+
+━━━ FOR ADMINS ━━━
+📄 Adding Documentation:
+• Drop a file (.txt, .md, .pdf) in chat
+• /load_url <link> - Load from a website
+• /load_text <text> - Add text directly
+
+🔧 Management:
+• /docs_info - See what's loaded
+• /clear_docs - Remove all docs (start fresh)
+
+━━━ EXAMPLES ━━━
+Ask: "How do I stake my tokens?"
+Ask: "What wallets are supported?"
+Ask: "What is the max supply?"
+
+"""
+        help_text += f"📊 Currently loaded: {doc_count} document chunks"
+
+        if doc_count == 0:
+            help_text += "\n\n⚠️ No docs loaded yet! Admins: upload a file or use /load_url to get started."
+
+        await update.message.reply_text(help_text)
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command."""
+        """Handle /status command - friendly status check."""
         project_id = self._get_project_id(update.message.chat)
-        doc_count = self.vector_store.count(project_id)
+        doc_count = self._get_doc_count(project_id)
 
-        status_message = f"""DocBot Status
+        if doc_count > 0:
+            status = f"""✅ DocBot is ready!
 
-Documents loaded: {doc_count}
-Model: {config.LLM_MODEL}
-Status: Online
-Chat ID: {project_id}
-        """
-        await update.message.reply_text(status_message)
+📊 Documents loaded: {doc_count} chunks
+🤖 AI Model: {config.LLM_MODEL.split('/')[-1]}
+💬 Status: Online and ready to answer
+
+Just type your question!"""
+        else:
+            status = """⚠️ No documents loaded yet!
+
+To get started, an admin needs to:
+1️⃣ Drop a file here (.txt, .md, .pdf)
+2️⃣ Or use /load_url https://your-docs.com
+
+Once docs are loaded, I can answer questions!"""
+
+        await update.message.reply_text(status)
+
+    # =========================================================================
+    # ASKING QUESTIONS
+    # =========================================================================
 
     async def ask_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /ask command."""
-        # Get the question from the command
         if context.args:
             question = ' '.join(context.args)
             project_id = self._get_project_id(update.message.chat)
             await self._answer_question(update, question, project_id)
         else:
             await update.message.reply_text(
-                "Please include your question. Example: /ask How do I stake?"
+                "❓ Please include your question!\n\n"
+                "Example: /ask How do I stake my tokens?"
             )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,110 +215,162 @@ Chat ID: {project_id}
 
     async def _answer_question(self, update: Update, question: str, project_id: str = "default"):
         """Generate and send an answer for a specific project."""
+        doc_count = self._get_doc_count(project_id)
+
+        # Check if docs are loaded
+        if doc_count == 0:
+            await update.message.reply_text(
+                "📭 I don't have any documentation loaded yet!\n\n"
+                "An admin needs to:\n"
+                "• Drop a file here (.txt, .md, .pdf)\n"
+                "• Or use /load_url https://your-docs.com\n\n"
+                "Once docs are loaded, I can answer questions!"
+            )
+            return
+
         # Show typing indicator
         await update.message.chat.send_action('typing')
 
         try:
-            # Get answer from brain (project-specific)
+            # Get answer from brain
             result = self.answerer.answer(question, project_id=project_id)
-
-            # Format response
             response = result['answer']
 
-            # Add sources if available
+            # Add source info if confident
             if result['sources'] and result['confidence'] > 0.5:
-                sources = ', '.join(result['sources'][:3])
-                response += f"\n\nSource: {sources}"
+                sources = ', '.join(result['sources'][:2])
+                response += f"\n\n📄 Source: {sources}"
 
-            # Send without markdown to avoid parsing errors
             await update.message.reply_text(response)
 
         except Exception as e:
             logger.error(f"Error answering question: {e}")
             await update.message.reply_text(
-                "Sorry, I encountered an error. Please try again!"
+                "😅 Sorry, I had trouble answering that. Please try again!\n\n"
+                "If this keeps happening, try rephrasing your question."
             )
 
-    async def reload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin command to reload documents for THIS chat."""
-        project_id = self._get_project_id(update.message.chat)
-        docs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "docs", project_id)
-
-        if not os.path.exists(docs_dir):
-            await update.message.reply_text(f"No docs folder for this chat. Create: data/docs/{project_id}/")
-            return
-
-        try:
-            # Clear existing docs for THIS chat only
-            self.vector_store.clear_project(project_id)
-
-            # Load new docs
-            chunks = self.ingester.load_directory(docs_dir)
-            self.vector_store.add_documents(chunks, project_id=project_id)
-
-            await update.message.reply_text(f"Reloaded {len(chunks)} document chunks!")
-        except Exception as e:
-            await update.message.reply_text(f"Error reloading: {e}")
+    # =========================================================================
+    # DOCUMENT MANAGEMENT
+    # =========================================================================
 
     async def docs_info_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show document info for this chat."""
         project_id = self._get_project_id(update.message.chat)
-        doc_count = self.vector_store.count(project_id)
+        doc_count = self._get_doc_count(project_id)
+
+        if doc_count == 0:
+            await update.message.reply_text(
+                "📭 No documents loaded yet!\n\n"
+                "To add docs:\n"
+                "• Drop a file here (.txt, .md, .pdf)\n"
+                "• Or use /load_url https://your-docs.com"
+            )
+            return
 
         # Get sources
         project_docs = [d for d in self.vector_store.documents if d.get("project_id") == project_id]
         sources = list(set(d.get("source", "unknown") for d in project_docs))
 
-        message = f"""Documentation Info
+        message = f"""📚 Documentation Info
 
-Chat ID: {project_id}
-Documents: {doc_count}
-Sources: {', '.join(sources[:5]) if sources else 'None'}
-        """
+📊 Total chunks: {doc_count}
+📄 Sources: {len(sources)}
+
+"""
+        for source in sources[:5]:
+            message += f"• {source}\n"
+
+        if len(sources) > 5:
+            message += f"• ... and {len(sources) - 5} more"
+
+        message += "\n✅ Ready to answer questions!"
+
         await update.message.reply_text(message)
 
     async def clear_docs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Clear all documents for this chat."""
         project_id = self._get_project_id(update.message.chat)
+        doc_count = self._get_doc_count(project_id)
+
+        if doc_count == 0:
+            await update.message.reply_text("📭 No documents to clear!")
+            return
+
         removed = self.vector_store.clear_project(project_id)
-        await update.message.reply_text(f"Cleared {removed} documents for this chat.")
+        await update.message.reply_text(
+            f"🗑️ Cleared {removed} document chunks!\n\n"
+            "To add new docs:\n"
+            "• Drop a file here (.txt, .md, .pdf)\n"
+            "• Or use /load_url https://your-docs.com"
+        )
 
     async def load_text_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Load documentation from text directly."""
         if not context.args:
-            await update.message.reply_text("Please provide text. Example: /load_text Our project offers 10% APY...")
+            await update.message.reply_text(
+                "📝 Please provide the text to add!\n\n"
+                "Example:\n"
+                "/load_text Our project offers 10% APY staking. "
+                "Supported wallets include MetaMask and WalletConnect."
+            )
             return
 
         text = ' '.join(context.args)
         project_id = self._get_project_id(update.message.chat)
 
         try:
-            chunks = self.ingester.load_text(text, source="telegram_input")
+            chunks = self.ingester.load_text(text, source="manual_input")
             self.vector_store.add_documents(chunks, project_id=project_id)
-            await update.message.reply_text(f"Added {len(chunks)} chunks to knowledge base!")
+
+            total_docs = self._get_doc_count(project_id)
+
+            await update.message.reply_text(
+                f"✅ Added {len(chunks)} chunk(s) to knowledge base!\n\n"
+                f"📊 Total documents: {total_docs} chunks\n\n"
+                f"I'm ready to answer questions about this content!"
+                f"{self._get_suggested_questions(project_id)}"
+            )
         except Exception as e:
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(f"❌ Error adding text: {e}")
 
     async def load_url_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Load documentation from a URL."""
         if not context.args:
-            await update.message.reply_text("Please provide a URL. Example: /load_url https://docs.example.com/faq")
+            await update.message.reply_text(
+                "🔗 Please provide a URL!\n\n"
+                "Example:\n"
+                "/load_url https://docs.yourproject.com/faq"
+            )
             return
 
         url = context.args[0]
         project_id = self._get_project_id(update.message.chat)
 
-        await update.message.reply_text(f"Loading docs from URL...")
+        await update.message.reply_text(f"🔄 Loading docs from URL...\n{url}")
 
         try:
             chunks = self.ingester.load_url(url)
             if chunks:
                 self.vector_store.add_documents(chunks, project_id=project_id)
-                await update.message.reply_text(f"Loaded {len(chunks)} chunks from {url}")
+                total_docs = self._get_doc_count(project_id)
+
+                await update.message.reply_text(
+                    f"✅ Loaded {len(chunks)} chunks from URL!\n\n"
+                    f"📊 Total documents: {total_docs} chunks\n\n"
+                    f"I'm ready to answer questions!"
+                    f"{self._get_suggested_questions(project_id)}"
+                )
             else:
-                await update.message.reply_text("Could not extract any content from that URL.")
+                await update.message.reply_text(
+                    "⚠️ Couldn't extract content from that URL.\n\n"
+                    "Try a different page, or use /load_text to paste content directly."
+                )
         except Exception as e:
-            await update.message.reply_text(f"Error loading URL: {e}")
+            await update.message.reply_text(
+                f"❌ Error loading URL: {e}\n\n"
+                "Make sure the URL is correct and accessible."
+            )
 
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle file uploads."""
@@ -222,12 +378,17 @@ Sources: {', '.join(sources[:5]) if sources else 'None'}
         file_name = document.file_name.lower()
 
         # Check supported formats
-        if not any(file_name.endswith(ext) for ext in ['.txt', '.md', '.pdf']):
-            await update.message.reply_text("Supported formats: .txt, .md, .pdf")
+        supported = ['.txt', '.md', '.pdf']
+        if not any(file_name.endswith(ext) for ext in supported):
+            await update.message.reply_text(
+                f"⚠️ Unsupported file format!\n\n"
+                f"Supported formats: {', '.join(supported)}\n\n"
+                f"You uploaded: {document.file_name}"
+            )
             return
 
         project_id = self._get_project_id(update.message.chat)
-        await update.message.reply_text(f"Processing {document.file_name}...")
+        await update.message.reply_text(f"📄 Processing {document.file_name}...")
 
         try:
             # Download file
@@ -240,16 +401,75 @@ Sources: {', '.join(sources[:5]) if sources else 'None'}
             chunks = self.ingester.load_file(file_path)
             if chunks:
                 self.vector_store.add_documents(chunks, project_id=project_id)
-                await update.message.reply_text(f"Loaded {len(chunks)} chunks from {document.file_name}")
+                total_docs = self._get_doc_count(project_id)
+
+                await update.message.reply_text(
+                    f"✅ Loaded {len(chunks)} chunks from {document.file_name}!\n\n"
+                    f"📊 Total documents: {total_docs} chunks\n\n"
+                    f"I'm ready to answer questions about this content!"
+                    f"{self._get_suggested_questions(project_id)}"
+                )
             else:
-                await update.message.reply_text("Could not extract any content from that file.")
+                await update.message.reply_text(
+                    f"⚠️ Couldn't extract content from {document.file_name}.\n\n"
+                    "The file might be empty or in an unsupported format."
+                )
 
             # Cleanup
             os.remove(file_path)
 
         except Exception as e:
             logger.error(f"Error processing file: {e}")
-            await update.message.reply_text(f"Error processing file: {e}")
+            await update.message.reply_text(
+                f"❌ Error processing file: {e}\n\n"
+                "Please try again or use a different file."
+            )
+
+    async def reload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to reload documents for THIS chat."""
+        project_id = self._get_project_id(update.message.chat)
+        docs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "docs", project_id)
+
+        if not os.path.exists(docs_dir):
+            await update.message.reply_text(
+                f"📭 No local docs folder found for this chat.\n\n"
+                f"Use /load_url or drop a file to add docs!"
+            )
+            return
+
+        try:
+            await update.message.reply_text("🔄 Reloading documents...")
+
+            # Clear existing docs for THIS chat only
+            self.vector_store.clear_project(project_id)
+
+            # Load new docs
+            chunks = self.ingester.load_directory(docs_dir)
+            self.vector_store.add_documents(chunks, project_id=project_id)
+
+            await update.message.reply_text(
+                f"✅ Reloaded {len(chunks)} document chunks!\n\n"
+                f"I'm ready to answer questions!"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error reloading: {e}")
+
+    # =========================================================================
+    # BOT SETUP
+    # =========================================================================
+
+    async def post_init(self, application):
+        """Set up bot commands menu."""
+        commands = [
+            BotCommand("start", "👋 Get started with DocBot"),
+            BotCommand("help", "📚 Show all commands"),
+            BotCommand("ask", "❓ Ask a question"),
+            BotCommand("status", "📊 Check bot status"),
+            BotCommand("docs_info", "📄 See loaded docs"),
+            BotCommand("load_url", "🔗 Load docs from URL"),
+            BotCommand("clear_docs", "🗑️ Clear all docs"),
+        ]
+        await application.bot.set_my_commands(commands)
 
     def run(self):
         """Start the Telegram bot."""
@@ -259,7 +479,7 @@ Sources: {', '.join(sources[:5]) if sources else 'None'}
             return
 
         # Create application
-        self.app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+        self.app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(self.post_init).build()
 
         # Add handlers
         self.app.add_handler(CommandHandler("start", self.start_command))
