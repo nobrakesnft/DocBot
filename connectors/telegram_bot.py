@@ -17,8 +17,10 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
+    Defaults
 )
+from telegram.request import HTTPXRequest
 
 import config
 from brain import DocumentIngester, VectorStore, Answerer
@@ -478,8 +480,23 @@ Once docs are loaded, I can answer questions!"""
             print("Get a token from @BotFather on Telegram")
             return
 
-        # Create application
-        self.app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(self.post_init).build()
+        # Create custom request with longer timeouts
+        request = HTTPXRequest(
+            connection_pool_size=8,
+            connect_timeout=30.0,
+            read_timeout=30.0,
+            write_timeout=30.0,
+            pool_timeout=30.0
+        )
+
+        # Create application with custom request
+        self.app = (
+            Application.builder()
+            .token(config.TELEGRAM_BOT_TOKEN)
+            .request(request)
+            .post_init(self.post_init)
+            .build()
+        )
 
         # Add handlers
         self.app.add_handler(CommandHandler("start", self.start_command))
