@@ -1,7 +1,7 @@
 """
-Vector Store
-Simple vector store using numpy and local embeddings.
-Works with Python 3.14+ (no ChromaDB dependency issues).
+Vector Store (Multi-Tenant)
+Supports multiple projects with isolated document stores.
+Each project (server/group) has its own documents.
 """
 
 import os
@@ -17,37 +17,17 @@ import config
 
 
 class VectorStore:
-    """Simple vector store using local storage and API embeddings."""
+    """Multi-tenant vector store - each project has isolated docs."""
 
     def __init__(self, persist_dir: str = None):
         self.persist_dir = persist_dir or config.CHROMA_PERSIST_DIR
-        self.documents = []  # List of {"text": ..., "source": ..., "embedding": ...}
+        self.documents = []  # List of {"text": ..., "source": ..., "project_id": ..., "embedding": ...}
         self._load()
 
-    def _get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text using Groq/OpenAI compatible API."""
-        from litellm import embedding
-
-        # Set API key
-        os.environ["GROQ_API_KEY"] = config.GROQ_API_KEY
-
-        try:
-            # Use a small embedding model
-            response = embedding(
-                model="text-embedding-3-small",  # OpenAI embedding model
-                input=[text]
-            )
-            return response.data[0]['embedding']
-        except Exception as e:
-            # Fallback: use simple hash-based pseudo-embedding
-            # This is not ideal but works for testing
-            return self._simple_embedding(text)
-
     def _simple_embedding(self, text: str) -> List[float]:
-        """Simple fallback embedding using word hashing."""
+        """Simple embedding using word hashing."""
         import hashlib
 
-        # Create a simple 384-dim embedding from text
         words = text.lower().split()
         embedding = [0.0] * 384
 
@@ -56,7 +36,6 @@ class VectorStore:
             for j in range(384):
                 embedding[j] += ((hash_val >> (j % 32)) & 1) * 0.01
 
-        # Normalize
         magnitude = sum(x*x for x in embedding) ** 0.5
         if magnitude > 0:
             embedding = [x / magnitude for x in embedding]
@@ -74,12 +53,13 @@ class VectorStore:
 
         return dot_product / (magnitude_a * magnitude_b)
 
-    def add_documents(self, chunks: List[Dict]) -> int:
+    def add_documents(self, chunks: List[Dict], project_id: str = "default") -> int:
         """
-        Add document chunks to the vector store.
+        Add document chunks for a specific project.
 
         Args:
-            chunks: List of dicts with 'text', 'source', 'chunk_index'
+            chunks: List of dicts with 'text', 'source'
+            project_id: Unique identifier for the project (server_id, group_id, etc.)
 
         Returns:
             Number of documents added
@@ -87,37 +67,32 @@ class VectorStore:
         if not chunks:
             return 0
 
-        print(f"Adding {len(chunks)} documents to vector store...")
+        print(f"Adding {len(chunks)} documents for project: {project_id}")
 
         for i, chunk in enumerate(chunks):
             text = chunk["text"]
-
-            # Get embedding
-            embedding = self._simple_embedding(text)  # Use simple embedding for speed
+            embedding = self._simple_embedding(text)
 
             doc = {
                 "text": text,
                 "source": chunk.get("source", "unknown"),
                 "chunk_index": chunk.get("chunk_index", i),
+                "project_id": project_id,  # Multi-tenant key
                 "embedding": embedding
             }
             self.documents.append(doc)
 
-            if (i + 1) % 10 == 0:
-                print(f"  Processed {i + 1}/{len(chunks)} chunks...")
-
-        # Save to disk
         self._save()
-
         print(f"Added {len(chunks)} documents. Total: {len(self.documents)}")
         return len(chunks)
 
-    def search(self, query: str, top_k: int = None) -> List[Dict]:
+    def search(self, query: str, project_id: str = "default", top_k: int = None) -> List[Dict]:
         """
-        Search for relevant documents.
+        Search for relevant documents within a specific project.
 
         Args:
             query: The search query
+            project_id: Only search this project's documents
             top_k: Number of results to return
 
         Returns:
@@ -125,15 +100,16 @@ class VectorStore:
         """
         top_k = top_k or config.TOP_K_RESULTS
 
-        if not self.documents:
+        # Filter documents by project_id
+        project_docs = [d for d in self.documents if d.get("project_id") == project_id]
+
+        if not project_docs:
             return []
 
-        # Get query embedding
         query_embedding = self._simple_embedding(query)
 
-        # Calculate similarities
         results = []
-        for doc in self.documents:
+        for doc in project_docs:
             similarity = self._cosine_similarity(query_embedding, doc["embedding"])
             results.append({
                 "text": doc["text"],
@@ -141,69 +117,98 @@ class VectorStore:
                 "similarity": similarity
             })
 
-        # Sort by similarity (descending)
         results.sort(key=lambda x: x["similarity"], reverse=True)
-
         return results[:top_k]
 
-    def get_context(self, query: str, top_k: int = None) -> str:
-        """
-        Get formatted context string for LLM.
-
-        Args:
-            query: The user's question
-            top_k: Number of chunks to include
-
-        Returns:
-            Formatted context string
-        """
-        results = self.search(query, top_k)
+    def get_context(self, query: str, project_id: str = "default", top_k: int = None) -> str:
+        """Get formatted context string for LLM."""
+        results = self.search(query, project_id, top_k)
 
         if not results:
-            return "No relevant documentation found."
+            return "No relevant documentation found for this project."
 
         context_parts = []
-        for i, result in enumerate(results, 1):
-            context_parts.append(
-                f"[Source: {result['source']}]\n{result['text']}"
-            )
+        for result in results:
+            context_parts.append(f"[Source: {result['source']}]\n{result['text']}")
 
         return "\n\n---\n\n".join(context_parts)
 
+    def clear_project(self, project_id: str):
+        """Delete all documents for a specific project."""
+        before_count = len(self.documents)
+        self.documents = [d for d in self.documents if d.get("project_id") != project_id]
+        after_count = len(self.documents)
+        self._save()
+        removed = before_count - after_count
+        print(f"Cleared {removed} documents for project: {project_id}")
+        return removed
+
     def clear(self):
-        """Delete all documents."""
+        """Delete ALL documents (all projects)."""
         self.documents = []
         self._save()
         print("Cleared all documents.")
 
-    def count(self) -> int:
-        """Get the number of documents in the store."""
+    def count(self, project_id: str = None) -> int:
+        """Get document count (optionally filtered by project)."""
+        if project_id:
+            return len([d for d in self.documents if d.get("project_id") == project_id])
         return len(self.documents)
 
-    def get_stats(self) -> Dict:
+    def list_projects(self) -> List[Dict]:
+        """List all projects and their document counts."""
+        projects = {}
+        for doc in self.documents:
+            pid = doc.get("project_id", "default")
+            if pid not in projects:
+                projects[pid] = {"project_id": pid, "doc_count": 0, "sources": set()}
+            projects[pid]["doc_count"] += 1
+            projects[pid]["sources"].add(doc.get("source", "unknown"))
+
+        # Convert sets to lists for JSON serialization
+        result = []
+        for pid, data in projects.items():
+            result.append({
+                "project_id": pid,
+                "doc_count": data["doc_count"],
+                "sources": list(data["sources"])
+            })
+
+        return result
+
+    def get_stats(self, project_id: str = None) -> Dict:
         """Get statistics about the vector store."""
+        if project_id:
+            return {
+                "project_id": project_id,
+                "document_count": self.count(project_id),
+                "total_documents": self.count()
+            }
         return {
-            "collection_name": "docbot_docs",
-            "document_count": self.count(),
-            "persist_dir": self.persist_dir
+            "total_documents": self.count(),
+            "projects": self.list_projects()
         }
 
     def _save(self):
         """Save documents to disk."""
         os.makedirs(self.persist_dir, exist_ok=True)
         filepath = os.path.join(self.persist_dir, "documents.pkl")
-
         with open(filepath, "wb") as f:
             pickle.dump(self.documents, f)
 
     def _load(self):
         """Load documents from disk."""
         filepath = os.path.join(self.persist_dir, "documents.pkl")
-
         if os.path.exists(filepath):
             try:
                 with open(filepath, "rb") as f:
                     self.documents = pickle.load(f)
+
+                # Migration: add project_id to old documents if missing
+                for doc in self.documents:
+                    if "project_id" not in doc:
+                        doc["project_id"] = "default"
+
                 print(f"Loaded {len(self.documents)} documents from storage.")
             except Exception as e:
                 print(f"Error loading documents: {e}")
@@ -215,55 +220,37 @@ class VectorStore:
 # =============================================================================
 
 if __name__ == "__main__":
-    from ingester import DocumentIngester
-
-    # Initialize
-    ingester = DocumentIngester()
     store = VectorStore()
 
-    # Clear previous data
+    # Test multi-tenant
+    print("\n=== Testing Multi-Tenant Vector Store ===\n")
+
+    # Clear all
     store.clear()
 
-    # Sample documents
-    sample_text = """
-    Welcome to CryptoProject!
+    # Add docs for Project A
+    store.add_documents([
+        {"text": "Project A stakes at 10% APY on Ethereum.", "source": "project_a.md"},
+        {"text": "Project A uses MetaMask wallet.", "source": "project_a.md"},
+    ], project_id="project_a")
 
-    How to stake:
-    1. Connect your wallet to app.cryptoproject.io
-    2. Select the amount to stake
-    3. Confirm the transaction
-    4. Start earning 10% APY rewards!
+    # Add docs for Project B
+    store.add_documents([
+        {"text": "Project B stakes at 15% APY on Solana.", "source": "project_b.md"},
+        {"text": "Project B uses Phantom wallet.", "source": "project_b.md"},
+    ], project_id="project_b")
 
-    How to unstake:
-    1. Go to the staking dashboard
-    2. Click "Unstake"
-    3. Wait for the 7-day unbonding period
-    4. Claim your tokens
+    # Test search isolation
+    print("\n--- Search 'APY' in Project A ---")
+    results = store.search("What is the APY?", project_id="project_a")
+    for r in results:
+        print(f"  [{r['similarity']:.3f}] {r['text']}")
 
-    Tokenomics:
-    Total supply is 100 million tokens.
-    Staking rewards come from protocol fees.
-    """
+    print("\n--- Search 'APY' in Project B ---")
+    results = store.search("What is the APY?", project_id="project_b")
+    for r in results:
+        print(f"  [{r['similarity']:.3f}] {r['text']}")
 
-    # Process and store
-    print("Loading documents...")
-    chunks = ingester.load_text(sample_text, source="sample_docs")
-    print(f"Created {len(chunks)} chunks")
-
-    print("\nAdding to vector store...")
-    store.add_documents(chunks)
-    print(f"Total documents: {store.count()}")
-
-    # Test search
-    print("\n--- Testing Search ---")
-    test_queries = [
-        "How do I stake my tokens?",
-        "What is the APY?",
-        "How long does unstaking take?"
-    ]
-
-    for query in test_queries:
-        print(f"\nQuery: {query}")
-        results = store.search(query, top_k=2)
-        for r in results:
-            print(f"  [{r['similarity']:.3f}] {r['text'][:60]}...")
+    print("\n--- List Projects ---")
+    for p in store.list_projects():
+        print(f"  {p['project_id']}: {p['doc_count']} docs from {p['sources']}")

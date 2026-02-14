@@ -1,6 +1,6 @@
 """
-Answerer
-Generates answers using LLM based on retrieved context.
+Answerer (Multi-Tenant)
+Generates answers using LLM based on project-specific context.
 """
 
 import os
@@ -15,7 +15,7 @@ from brain.vectorstore import VectorStore
 
 
 class Answerer:
-    """Generates answers using LLM and vector search."""
+    """Generates answers using LLM and project-specific vector search."""
 
     def __init__(self, vector_store: VectorStore = None):
         self.vector_store = vector_store or VectorStore()
@@ -28,23 +28,24 @@ class Answerer:
                 "GROQ_API_KEY not configured. Please add it to your .env file."
             )
 
-    def answer(self, question: str, top_k: int = None) -> dict:
+    def answer(self, question: str, project_id: str = "default", top_k: int = None) -> dict:
         """
-        Answer a question using RAG (Retrieval Augmented Generation).
+        Answer a question using RAG for a specific project.
 
         Args:
             question: The user's question
+            project_id: Which project's docs to search
             top_k: Number of context chunks to use
 
         Returns:
             Dict with 'answer', 'sources', and 'confidence'
         """
-        # Get relevant context
-        results = self.vector_store.search(question, top_k)
+        # Get relevant context for this project
+        results = self.vector_store.search(question, project_id=project_id, top_k=top_k)
 
         if not results:
             return {
-                "answer": "I don't have any documentation loaded yet. Please ask an admin to add some docs!",
+                "answer": "I don't have any documentation loaded for this server yet. Please ask an admin to add docs!",
                 "sources": [],
                 "confidence": 0
             }
@@ -60,7 +61,7 @@ class Answerer:
             }
 
         # Build context
-        context = self.vector_store.get_context(question, top_k)
+        context = self.vector_store.get_context(question, project_id=project_id, top_k=top_k)
 
         # Generate answer
         answer_text = self._generate_answer(question, context)
@@ -72,22 +73,11 @@ class Answerer:
         }
 
     def _generate_answer(self, question: str, context: str) -> str:
-        """
-        Generate an answer using the LLM.
-
-        Args:
-            question: The user's question
-            context: Retrieved document context
-
-        Returns:
-            The generated answer
-        """
+        """Generate an answer using the LLM."""
         from litellm import completion
 
-        # Set API key for Groq
         os.environ["GROQ_API_KEY"] = config.GROQ_API_KEY
 
-        # Build the prompt
         system_prompt = config.SYSTEM_PROMPT.format(context=context)
 
         try:
@@ -98,7 +88,7 @@ class Answerer:
                     {"role": "user", "content": question}
                 ],
                 max_tokens=500,
-                temperature=0.3  # Lower = more focused answers
+                temperature=0.3
             )
 
             return response.choices[0].message.content.strip()
@@ -107,17 +97,9 @@ class Answerer:
             print(f"LLM Error: {e}")
             return "Sorry, I encountered an error generating a response. Please try again."
 
-    def simple_answer(self, question: str) -> str:
-        """
-        Simple interface - just returns the answer text.
-
-        Args:
-            question: The user's question
-
-        Returns:
-            The answer string
-        """
-        result = self.answer(question)
+    def simple_answer(self, question: str, project_id: str = "default") -> str:
+        """Simple interface - just returns the answer text."""
+        result = self.answer(question, project_id=project_id)
         return result["answer"]
 
 
@@ -129,58 +111,42 @@ if __name__ == "__main__":
     from ingester import DocumentIngester
     from vectorstore import VectorStore
 
-    print("Testing Answerer...")
+    print("Testing Multi-Tenant Answerer...")
     print("=" * 50)
 
-    # Initialize components
     ingester = DocumentIngester()
     store = VectorStore()
 
-    # Add sample docs
-    sample_text = """
-    Welcome to CryptoProject!
+    # Clear and add test docs
+    store.clear()
 
-    How to stake:
-    1. Connect your wallet to app.cryptoproject.io
-    2. Click on the "Stake" tab
-    3. Enter the amount you want to stake
-    4. Confirm the transaction in your wallet
-    5. Start earning 10% APY rewards!
+    # Project A docs
+    chunks_a = ingester.load_text("""
+    Welcome to ProjectA!
+    We offer 10% APY staking on Ethereum.
+    Supported wallets: MetaMask, WalletConnect.
+    Minimum stake: 100 tokens.
+    """, source="projecta_docs")
+    store.add_documents(chunks_a, project_id="server_a")
 
-    How to unstake:
-    1. Go to the staking dashboard
-    2. Click "Unstake"
-    3. Wait for the 7-day unbonding period
-    4. Claim your tokens
+    # Project B docs
+    chunks_b = ingester.load_text("""
+    Welcome to ProjectB!
+    We offer 20% APY staking on Solana.
+    Supported wallets: Phantom, Solflare.
+    Minimum stake: 50 tokens.
+    """, source="projectb_docs")
+    store.add_documents(chunks_b, project_id="server_b")
 
-    Supported wallets:
-    - MetaMask
-    - WalletConnect
-    - Coinbase Wallet
-
-    Minimum stake: 100 tokens
-    Maximum stake: No limit
-    """
-
-    print("Loading sample documentation...")
-    chunks = ingester.load_text(sample_text, source="staking_guide")
-    store.add_documents(chunks)
-    print(f"Loaded {store.count()} chunks\n")
-
-    # Test the answerer
+    # Test answerer
     answerer = Answerer(store)
 
-    test_questions = [
-        "How do I stake my tokens?",
-        "What wallets are supported?",
-        "What is the minimum stake amount?",
-        "How long does unstaking take?"
-    ]
+    print("\n--- Question: 'What is the APY?' ---")
 
-    for q in test_questions:
-        print(f"Q: {q}")
-        result = answerer.answer(q)
-        print(f"A: {result['answer']}")
-        print(f"   Confidence: {result['confidence']:.2f}")
-        print(f"   Sources: {result['sources']}")
-        print()
+    print("\nAsking Server A:")
+    result = answerer.answer("What is the APY?", project_id="server_a")
+    print(f"  Answer: {result['answer']}")
+
+    print("\nAsking Server B:")
+    result = answerer.answer("What is the APY?", project_id="server_b")
+    print(f"  Answer: {result['answer']}")
