@@ -131,8 +131,19 @@ class DiscordBot:
             if self.bot.user in message.mentions:
                 question = message.content.replace(f'<@{self.bot.user.id}>', '').strip()
 
+                # Check if this is a reply to another message - include that context
+                if message.reference and message.reference.message_id:
+                    try:
+                        replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                        if replied_msg and replied_msg.content:
+                            # Prepend the replied-to message content for context
+                            replied_content = replied_msg.content[:500]  # Limit length
+                            question = f'[Regarding: "{replied_content}"]\n\n{question}'
+                    except:
+                        pass  # Couldn't fetch replied message, continue without it
+
                 # Just mentioned without text - casual response
-                if not question:
+                if not question or question.strip() == '':
                     await message.reply("yo, got a question? just @ me with it", mention_author=False)
                     return
 

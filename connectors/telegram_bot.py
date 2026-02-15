@@ -243,6 +243,11 @@ Questions? Just ask!"""
         if context.args:
             question = ' '.join(context.args)
 
+            # Check if this is a reply to another message - include that context
+            if update.message.reply_to_message and update.message.reply_to_message.text:
+                replied_content = update.message.reply_to_message.text[:500]
+                question = f'[Regarding: "{replied_content}"]\n\n{question}'
+
             # Rate limiting
             user_id = str(update.message.from_user.id)
             is_allowed, remaining = bot_utils.check_cooldown(user_id)
@@ -254,9 +259,24 @@ Questions? Just ask!"""
             await self._answer_question(update, question, project_id)
             bot_utils.record_question(user_id)
         else:
-            await update.message.reply_text(
-                "just ask! like: /ask how do I stake?"
-            )
+            # No question provided - check if replying to a message
+            if update.message.reply_to_message and update.message.reply_to_message.text:
+                replied_content = update.message.reply_to_message.text[:500]
+                question = f'[Regarding: "{replied_content}"]\n\nExplain this or answer any question in it'
+
+                user_id = str(update.message.from_user.id)
+                is_allowed, remaining = bot_utils.check_cooldown(user_id)
+                if not is_allowed:
+                    await update.message.reply_text(f"chill, gimme like {remaining}s 😅")
+                    return
+
+                project_id = self._get_project_id(update.message.chat)
+                await self._answer_question(update, question, project_id)
+                bot_utils.record_question(user_id)
+            else:
+                await update.message.reply_text(
+                    "just ask! like: /ask how do I stake?"
+                )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle regular messages - smart detection for when to respond."""
@@ -271,19 +291,27 @@ Questions? Just ask!"""
         if question.startswith('/'):
             return
 
+        # Check if this is a reply to another message - include that context
+        if update.message.reply_to_message and update.message.reply_to_message.text:
+            replied_content = update.message.reply_to_message.text[:500]  # Limit length
+            question = f'[Regarding: "{replied_content}"]\n\n{question}'
+
         # Check if it should be ignored (greetings, reactions, etc.)
-        if bot_utils.should_ignore(question):
+        # Only check the original question part, not the prepended context
+        original_question = update.message.text
+        if bot_utils.should_ignore(original_question):
             # In DMs, maybe respond to greetings casually
-            if chat_type == "private" and bot_utils.is_greeting(question):
+            if chat_type == "private" and bot_utils.is_greeting(original_question):
                 greetings = ["gm!", "hey 👋", "yo, got a question?", "gm gm"]
                 await update.message.reply_text(random.choice(greetings))
             return
 
-        # In groups: only respond if it looks like a question
-        # In DMs: more lenient, respond to most things
+        # In groups: only respond if it looks like a question OR it's a reply to a message
+        # Replies to messages should always be answered (user is asking about that message)
         if chat_type in ["group", "supergroup"]:
-            if not bot_utils.is_question(question):
-                # Not a question in group chat - stay quiet
+            is_reply = update.message.reply_to_message is not None
+            if not is_reply and not bot_utils.is_question(original_question):
+                # Not a question and not a reply in group chat - stay quiet
                 return
 
         # Rate limiting
