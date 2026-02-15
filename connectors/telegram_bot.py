@@ -7,6 +7,8 @@ Self-explanatory UX - anyone can use it without coding knowledge.
 import os
 import sys
 import logging
+import random
+import asyncio
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +26,7 @@ from telegram.request import HTTPXRequest
 
 import config
 from brain import DocumentIngester, VectorStore, Answerer
+from connectors import bot_utils
 
 # Set up logging
 logging.basicConfig(
@@ -184,6 +187,53 @@ Once docs are loaded, I can answer questions!"""
 
         await update.message.reply_text(status)
 
+    async def setup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /setup command - guided onboarding for admins."""
+        project_id = self._get_project_id(update.message.chat)
+        doc_count = self._get_doc_count(project_id)
+
+        if doc_count > 0:
+            # Already set up
+            setup_text = f"""✅ DocBot is already set up!
+
+📊 Status: {doc_count} doc chunks loaded
+🤖 Ready to answer questions
+
+━━━ QUICK ACTIONS ━━━
+• /docs_info - See what's loaded
+• /load_url <link> - Add more docs
+• /clear_docs - Start fresh
+
+━━━ TEST IT ━━━
+Try asking: "How do I get started?"
+
+Need to add a new project's docs? Use /clear_docs first, then upload new files."""
+        else:
+            # Fresh setup
+            setup_text = """👋 Let's set up DocBot for your project!
+
+━━━ STEP 1: ADD YOUR DOCS ━━━
+Choose one:
+📄 Drop a file here (.txt, .md, .pdf)
+🔗 Use: /load_url https://your-docs-site.com
+📝 Use: /load_text <paste your FAQ here>
+
+━━━ STEP 2: TEST IT ━━━
+Once loaded, ask a question like:
+"How do I stake?" or "What's the tokenomics?"
+
+━━━ STEP 3: DONE! ━━━
+Your community can now ask questions 24/7
+
+━━━ PRO TIPS ━━━
+• Upload your whitepaper, FAQ, or gitbook
+• More docs = better answers
+• Bot auto-learns from what you upload
+
+Questions? Just ask!"""
+
+        await update.message.reply_text(setup_text)
+
     # =========================================================================
     # ASKING QUESTIONS
     # =========================================================================
@@ -192,17 +242,26 @@ Once docs are loaded, I can answer questions!"""
         """Handle /ask command."""
         if context.args:
             question = ' '.join(context.args)
+
+            # Rate limiting
+            user_id = str(update.message.from_user.id)
+            is_allowed, remaining = bot_utils.check_cooldown(user_id)
+            if not is_allowed:
+                await update.message.reply_text(f"chill, gimme like {remaining}s 😅")
+                return
+
             project_id = self._get_project_id(update.message.chat)
             await self._answer_question(update, question, project_id)
+            bot_utils.record_question(user_id)
         else:
             await update.message.reply_text(
-                "❓ Please include your question!\n\n"
-                "Example: /ask How do I stake my tokens?"
+                "just ask! like: /ask how do I stake?"
             )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle regular messages as questions."""
+        """Handle regular messages - smart detection for when to respond."""
         question = update.message.text
+        chat_type = update.message.chat.type
 
         # Ignore very short messages
         if len(question) < 3:
@@ -212,45 +271,99 @@ Once docs are loaded, I can answer questions!"""
         if question.startswith('/'):
             return
 
+        # Check if it should be ignored (greetings, reactions, etc.)
+        if bot_utils.should_ignore(question):
+            # In DMs, maybe respond to greetings casually
+            if chat_type == "private" and bot_utils.is_greeting(question):
+                greetings = ["gm!", "hey 👋", "yo, got a question?", "gm gm"]
+                await update.message.reply_text(random.choice(greetings))
+            return
+
+        # In groups: only respond if it looks like a question
+        # In DMs: more lenient, respond to most things
+        if chat_type in ["group", "supergroup"]:
+            if not bot_utils.is_question(question):
+                # Not a question in group chat - stay quiet
+                return
+
+        # Rate limiting
+        user_id = str(update.message.from_user.id)
+        is_allowed, remaining = bot_utils.check_cooldown(user_id)
+        if not is_allowed:
+            await update.message.reply_text(f"chill, gimme like {remaining}s 😅")
+            return
+
         project_id = self._get_project_id(update.message.chat)
         await self._answer_question(update, question, project_id)
+        bot_utils.record_question(user_id)
 
     async def _answer_question(self, update: Update, question: str, project_id: str = "default"):
         """Generate and send an answer for a specific project."""
+        chat_id = str(update.message.chat.id)
         doc_count = self._get_doc_count(project_id)
 
-        # Check if docs are loaded
+        # Step 1: Check if docs are loaded
         if doc_count == 0:
             await update.message.reply_text(
-                "📭 I don't have any documentation loaded yet!\n\n"
-                "An admin needs to:\n"
-                "• Drop a file here (.txt, .md, .pdf)\n"
-                "• Or use /load_url https://your-docs.com\n\n"
-                "Once docs are loaded, I can answer questions!"
+                "no docs loaded yet - an admin needs to add some first"
             )
+            return
+
+        # Step 2: Check for cached duplicate answer
+        cached = bot_utils.find_cached_answer(question, project_id)
+        if cached:
+            # Extract topic for contextual response
+            topic = bot_utils.extract_topic(question)
+
+            # Track repeat count per chat+topic
+            cache_key = f"{chat_id}:{topic}"
+            repeat_count = bot_utils.get_repeat_count(cache_key)
+
+            # Get sassy response with topic
+            response = bot_utils.get_smart_duplicate_response(topic, repeat_count)
+
+            if response:
+                # Reply to original cached message if possible
+                try:
+                    await update.message.reply_text(
+                        response,
+                        reply_to_message_id=int(cached['message_ref']) if cached['message_ref'].isdigit() else None
+                    )
+                except:
+                    await update.message.reply_text(response)
+            # If None, stay silent
             return
 
         # Show typing indicator
         await update.message.chat.send_action('typing')
 
+        # Human-like delay
+        await bot_utils.human_typing_delay()
+
         try:
             # Get answer from brain
             result = self.answerer.answer(question, project_id=project_id)
-            response = result['answer']
 
-            # Add source info if confident
-            if result['sources'] and result['confidence'] > 0.5:
-                sources = ', '.join(result['sources'][:2])
-                response += f"\n\n📄 Source: {sources}"
+            # Reply to the question (quotes it)
+            reply_msg = await update.message.reply_text(result['answer'])
 
-            await update.message.reply_text(response)
+            # Cache the answer with message ID
+            bot_utils.cache_answer(
+                question=question,
+                answer=result['answer'],
+                project_id=project_id,
+                message_ref=str(reply_msg.message_id),
+                user_id=str(update.message.from_user.id)
+            )
 
         except Exception as e:
             logger.error(f"Error answering question: {e}")
-            await update.message.reply_text(
-                "😅 Sorry, I had trouble answering that. Please try again!\n\n"
-                "If this keeps happening, try rephrasing your question."
-            )
+            error_responses = [
+                "ah something went wrong, try again?",
+                "oops hit an error there, mind rephrasing?",
+                "hmm broke something, try again maybe?",
+            ]
+            await update.message.reply_text(random.choice(error_responses))
 
     # =========================================================================
     # DOCUMENT MANAGEMENT
@@ -456,6 +569,63 @@ Once docs are loaded, I can answer questions!"""
         except Exception as e:
             await update.message.reply_text(f"❌ Error reloading: {e}")
 
+    async def set_tone_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set the response tone for this chat. (Admin)"""
+        if not context.args:
+            # Show current tone and options
+            project_id = self._get_project_id(update.message.chat)
+            current_tone = bot_utils.get_project_tone(project_id)
+
+            await update.message.reply_text(
+                f"🎨 RESPONSE TONE SETTINGS\n\n"
+                f"Current tone: **{current_tone}**\n\n"
+                f"━━━ AVAILABLE TONES ━━━\n\n"
+                f"📱 casual\n"
+                f"Friendly, web3-native, light slang\n"
+                f'Example: "No exact date yet, snapshot is planned for Q2 2026 👀"\n\n'
+                f"📝 neutral\n"
+                f"Friendly but clean, no slang\n"
+                f'Example: "Snapshot is planned for Q2 2026, but no exact date has been announced yet."\n\n'
+                f"💼 professional\n"
+                f"Formal support tone\n"
+                f'Example: "The snapshot is scheduled for Q2 2026. An exact date has not yet been announced."\n\n'
+                f"━━━ USAGE ━━━\n"
+                f"/set_tone casual\n"
+                f"/set_tone neutral\n"
+                f"/set_tone professional",
+                parse_mode="Markdown"
+            )
+            return
+
+        tone = context.args[0].lower()
+        project_id = self._get_project_id(update.message.chat)
+
+        if bot_utils.set_project_tone(project_id, tone):
+            tone_descriptions = {
+                "casual": "Friendly, web3-native, light slang allowed 🤙",
+                "neutral": "Friendly but clean, no slang or emojis",
+                "professional": "Formal support tone, precise language",
+            }
+            examples = {
+                "casual": '"No exact date yet, snapshot is planned for Q2 2026 👀"',
+                "neutral": '"Snapshot is planned for Q2 2026, but no exact date has been announced yet."',
+                "professional": '"The snapshot is scheduled for Q2 2026. An exact date has not yet been announced."',
+            }
+
+            await update.message.reply_text(
+                f"🎨 Tone Updated!\n\n"
+                f"New tone: **{tone}**\n"
+                f"Style: {tone_descriptions[tone]}\n\n"
+                f"Example response:\n{examples[tone]}",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Invalid tone!\n\n"
+                "Choose: casual, neutral, or professional\n\n"
+                "Example: /set_tone professional"
+            )
+
     # =========================================================================
     # BOT SETUP
     # =========================================================================
@@ -464,11 +634,13 @@ Once docs are loaded, I can answer questions!"""
         """Set up bot commands menu."""
         commands = [
             BotCommand("start", "👋 Get started with DocBot"),
+            BotCommand("setup", "🚀 Quick setup guide"),
             BotCommand("help", "📚 Show all commands"),
             BotCommand("ask", "❓ Ask a question"),
             BotCommand("status", "📊 Check bot status"),
             BotCommand("docs_info", "📄 See loaded docs"),
             BotCommand("load_url", "🔗 Load docs from URL"),
+            BotCommand("set_tone", "🎨 Set response tone"),
             BotCommand("clear_docs", "🗑️ Clear all docs"),
         ]
         await application.bot.set_my_commands(commands)
@@ -500,6 +672,7 @@ Once docs are loaded, I can answer questions!"""
 
         # Add handlers
         self.app.add_handler(CommandHandler("start", self.start_command))
+        self.app.add_handler(CommandHandler("setup", self.setup_command))
         self.app.add_handler(CommandHandler("help", self.help_command))
         self.app.add_handler(CommandHandler("status", self.status_command))
         self.app.add_handler(CommandHandler("ask", self.ask_command))
@@ -508,6 +681,7 @@ Once docs are loaded, I can answer questions!"""
         self.app.add_handler(CommandHandler("clear_docs", self.clear_docs_command))
         self.app.add_handler(CommandHandler("load_text", self.load_text_command))
         self.app.add_handler(CommandHandler("load_url", self.load_url_command))
+        self.app.add_handler(CommandHandler("set_tone", self.set_tone_command))
 
         # Handle regular messages
         self.app.add_handler(

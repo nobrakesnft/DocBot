@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 import aiohttp
+import asyncio
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,6 +19,7 @@ from discord.ext import commands
 
 import config
 from brain import DocumentIngester, VectorStore, Answerer
+from connectors import bot_utils
 
 # Set up logging
 logging.basicConfig(
@@ -128,30 +130,35 @@ class DiscordBot:
             # Check if bot was mentioned
             if self.bot.user in message.mentions:
                 question = message.content.replace(f'<@{self.bot.user.id}>', '').strip()
-                if question:
-                    project_id = self._get_project_id(message.guild)
-                    await self._answer_question(message.channel, question, project_id)
-                else:
-                    # Just mentioned without question
-                    project_id = self._get_project_id(message.guild)
-                    doc_count = self._get_doc_count(project_id)
 
-                    embed = discord.Embed(
-                        title="👋 Hey! I'm DocBot!",
-                        description="I answer questions based on project documentation.",
-                        color=discord.Color.blue()
-                    )
-                    embed.add_field(
-                        name="📊 Status",
-                        value=f"{doc_count} document chunks loaded",
-                        inline=True
-                    )
-                    embed.add_field(
-                        name="❓ How to Ask",
-                        value="@mention me with a question\nor use `/ask <question>`",
-                        inline=True
-                    )
-                    await message.channel.send(embed=embed)
+                # Just mentioned without text - casual response
+                if not question:
+                    await message.reply("yo, got a question? just @ me with it", mention_author=False)
+                    return
+
+                # Check if it should be ignored (greetings, reactions, etc.)
+                if bot_utils.should_ignore(question):
+                    # Maybe respond to greetings casually
+                    if bot_utils.is_greeting(question):
+                        greetings = ["gm!", "hey 👋", "yo", "gm gm"]
+                        import random
+                        await message.reply(random.choice(greetings), mention_author=False)
+                    return
+
+                # When explicitly @tagged, skip is_question() check
+                # Let the LLM handle it - it will answer or ask for clarification naturally
+
+                # Rate limiting
+                user_id = str(message.author.id)
+                is_allowed, remaining = bot_utils.check_cooldown(user_id)
+                if not is_allowed:
+                    await message.reply(f"chill, gimme like {remaining}s 😅", mention_author=False)
+                    return
+
+                # Answer the question
+                project_id = self._get_project_id(message.guild)
+                await self._answer_question(message, question, project_id)
+                bot_utils.record_question(user_id)
 
             # Handle file uploads from admins
             if message.attachments:
@@ -231,6 +238,60 @@ class DiscordBot:
                 inline=False
             )
             embed.set_footer(text=f"📊 Currently loaded: {doc_count} document chunks")
+
+            await interaction.response.send_message(embed=embed)
+
+        @self.bot.tree.command(name="setup", description="🚀 Quick setup guide for admins")
+        @app_commands.default_permissions(administrator=True)
+        async def setup_command(interaction: discord.Interaction):
+            """Guided onboarding for admins."""
+            project_id = self._get_project_id(interaction.guild)
+            doc_count = self._get_doc_count(project_id)
+
+            if doc_count > 0:
+                # Already set up
+                embed = discord.Embed(
+                    title="✅ DocBot is Ready!",
+                    description=f"**{doc_count}** doc chunks loaded and ready to answer questions.",
+                    color=discord.Color.green()
+                )
+                embed.add_field(
+                    name="🔧 Quick Actions",
+                    value="• `/docs_info` - See what's loaded\n• `/load_url <link>` - Add more docs\n• `/clear_docs` - Start fresh",
+                    inline=False
+                )
+                embed.add_field(
+                    name="🧪 Test It",
+                    value="Try: `/ask How do I get started?`",
+                    inline=False
+                )
+            else:
+                # Fresh setup
+                embed = discord.Embed(
+                    title="🚀 Let's Set Up DocBot!",
+                    description="Get your AI support bot running in 3 steps.",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(
+                    name="Step 1️⃣ Add Your Docs",
+                    value="Choose one:\n📄 Upload a file (.txt, .md, .pdf)\n🔗 `/load_url https://your-docs.com`\n📝 `/load_text <paste FAQ here>`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Step 2️⃣ Test It",
+                    value="Ask: `/ask How do I stake?`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Step 3️⃣ Done!",
+                    value="Your community can now ask questions 24/7 ✨",
+                    inline=False
+                )
+                embed.add_field(
+                    name="💡 Pro Tips",
+                    value="• Upload whitepaper, FAQ, or gitbook\n• More docs = better answers\n• Bot learns from what you upload",
+                    inline=False
+                )
 
             await interaction.response.send_message(embed=embed)
 
@@ -362,6 +423,46 @@ class DiscordBot:
 
             await interaction.response.send_message(embed=embed)
 
+        @self.bot.tree.command(name="set_tone", description="🎨 Set bot response tone (Admin)")
+        @app_commands.describe(tone="Response tone: casual, neutral, or professional")
+        @app_commands.choices(tone=[
+            app_commands.Choice(name="casual - Friendly, web3-native, light slang", value="casual"),
+            app_commands.Choice(name="neutral - Friendly but clean, no slang", value="neutral"),
+            app_commands.Choice(name="professional - Formal support tone", value="professional"),
+        ])
+        @app_commands.default_permissions(administrator=True)
+        async def set_tone_command(interaction: discord.Interaction, tone: str):
+            """Set the response tone for this server."""
+            project_id = self._get_project_id(interaction.guild)
+
+            if bot_utils.set_project_tone(project_id, tone):
+                tone_descriptions = {
+                    "casual": "Friendly, web3-native, light slang allowed 🤙",
+                    "neutral": "Friendly but clean, no slang or emojis",
+                    "professional": "Formal support tone, precise language",
+                }
+
+                embed = discord.Embed(
+                    title="🎨 Tone Updated!",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="New Tone", value=f"**{tone}**", inline=True)
+                embed.add_field(name="Style", value=tone_descriptions[tone], inline=False)
+
+                # Show example
+                examples = {
+                    "casual": '"No exact date yet, snapshot is planned for Q2 2026 👀"',
+                    "neutral": '"Snapshot is planned for Q2 2026, but no exact date has been announced yet."',
+                    "professional": '"The snapshot is scheduled for Q2 2026. An exact date has not yet been announced."',
+                }
+                embed.add_field(name="Example Response", value=examples[tone], inline=False)
+
+                await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.response.send_message(
+                    "❌ Invalid tone. Choose: casual, neutral, or professional"
+                )
+
     async def _handle_file_upload(self, message, attachment):
         """Handle file upload from message."""
         project_id = self._get_project_id(message.guild)
@@ -423,86 +524,127 @@ class DiscordBot:
             logger.error(f"Error processing file: {e}")
             await message.channel.send(f"❌ Error processing file: {e}")
 
-    async def _answer_question(self, channel, question: str, project_id: str = "default"):
-        """Generate and send an answer to a channel."""
+    async def _answer_question(self, message, question: str, project_id: str = "default"):
+        """
+        Generate and send an answer with proper duplicate/spam control.
+
+        Flow:
+        1. Check docs loaded
+        2. Check for cached duplicate (includes link to original)
+        3. If duplicate: send sassy response with link
+        4. If allowed: generate answer, cache it
+        """
+        channel_id = str(message.channel.id)
+        user_id = str(message.author.id)
         doc_count = self._get_doc_count(project_id)
 
-        # Check if docs are loaded
+        # Step 1: Check if docs are loaded
         if doc_count == 0:
-            embed = discord.Embed(
-                title="📭 No Documentation Loaded",
-                description="I need documentation to answer questions!",
-                color=discord.Color.yellow()
+            await message.reply(
+                "no docs loaded yet - an admin needs to upload a file or use `/load_url` first",
+                mention_author=False
             )
-            embed.add_field(
-                name="🚀 Quick Setup (Admins)",
-                value="1️⃣ Upload a doc file (.txt, .md, .pdf)\n2️⃣ Or use `/load_url https://your-docs.com`",
-                inline=False
-            )
-            await channel.send(embed=embed)
             return
 
-        async with channel.typing():
+        # Step 2: Check for cached duplicate answer
+        cached = bot_utils.find_cached_answer(question, project_id)
+        if cached:
+            # Extract topic for contextual response
+            topic = bot_utils.extract_topic(question)
+
+            # Track repeat count per channel+topic
+            cache_key = f"{channel_id}:{topic}"
+            repeat_count = bot_utils.get_repeat_count(cache_key)
+
+            # Get sassy response with topic
+            response = bot_utils.get_smart_duplicate_response(topic, repeat_count)
+
+            if response:
+                # Include link to original answer
+                await message.reply(f"{response}\n{cached['message_ref']}", mention_author=False)
+            # If None, stay silent
+            return
+
+        # Step 3: Generate fresh answer
+        async with message.channel.typing():
+            await bot_utils.human_typing_delay()
+
             try:
                 result = self.answerer.answer(question, project_id=project_id)
 
-                embed = discord.Embed(
-                    description=result['answer'],
-                    color=discord.Color.blue()
+                # Send answer
+                reply_msg = await message.reply(result['answer'], mention_author=False)
+
+                # Cache the answer for duplicate detection
+                message_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{reply_msg.id}"
+                bot_utils.cache_answer(
+                    question=question,
+                    answer=result['answer'],
+                    project_id=project_id,
+                    message_ref=message_link,
+                    user_id=user_id
                 )
-
-                if result['sources'] and result['confidence'] > 0.5:
-                    sources = ', '.join(result['sources'][:2])
-                    embed.set_footer(text=f"📄 Source: {sources}")
-
-                await channel.send(embed=embed)
 
             except Exception as e:
                 logger.error(f"Error answering question: {e}")
-                await channel.send(
-                    "😅 Sorry, I had trouble answering that. Please try again!\n\n"
-                    "If this keeps happening, try rephrasing your question."
-                )
+                await message.reply("something went wrong, try again?", mention_author=False)
 
     async def _answer_interaction(self, interaction: discord.Interaction, question: str, project_id: str = "default"):
-        """Generate and send an answer to an interaction."""
+        """Generate and send an answer to an interaction (slash command)."""
+        channel_id = str(interaction.channel.id)
+        user_id = str(interaction.user.id)
         doc_count = self._get_doc_count(project_id)
 
-        # Check if docs are loaded
+        # Step 1: Check if docs are loaded
         if doc_count == 0:
-            embed = discord.Embed(
-                title="📭 No Documentation Loaded",
-                description="I need documentation to answer questions!",
-                color=discord.Color.yellow()
+            await interaction.followup.send(
+                "no docs loaded yet - an admin needs to upload a file or use `/load_url` first"
             )
-            embed.add_field(
-                name="🚀 Quick Setup (Admins)",
-                value="1️⃣ Upload a doc file (.txt, .md, .pdf)\n2️⃣ Or use `/load_url https://your-docs.com`",
-                inline=False
-            )
-            await interaction.followup.send(embed=embed)
+            return
+
+        # Step 2: Rate limiting
+        is_allowed, remaining = bot_utils.check_cooldown(user_id)
+        if not is_allowed:
+            await interaction.followup.send(f"chill, gimme like {remaining}s 😅")
+            return
+
+        # Step 3: Check for cached duplicate answer
+        cached = bot_utils.find_cached_answer(question, project_id)
+        if cached:
+            topic = bot_utils.extract_topic(question)
+            cache_key = f"{channel_id}:{topic}"
+            repeat_count = bot_utils.get_repeat_count(cache_key)
+
+            response = bot_utils.get_smart_duplicate_response(topic, repeat_count)
+            if response:
+                await interaction.followup.send(f"{response}\n{cached['message_ref']}")
             return
 
         try:
             result = self.answerer.answer(question, project_id=project_id)
 
-            embed = discord.Embed(
-                description=result['answer'],
-                color=discord.Color.blue()
+            # Plain text reply
+            reply_msg = await interaction.followup.send(result['answer'], wait=True)
+            bot_utils.record_question(user_id)
+
+            # Cache the answer
+            message_link = f"https://discord.com/channels/{interaction.guild.id}/{interaction.channel.id}/{reply_msg.id}"
+            bot_utils.cache_answer(
+                question=question,
+                answer=result['answer'],
+                project_id=project_id,
+                message_ref=message_link,
+                user_id=user_id
             )
-
-            if result['sources'] and result['confidence'] > 0.5:
-                sources = ', '.join(result['sources'][:2])
-                embed.set_footer(text=f"📄 Source: {sources}")
-
-            await interaction.followup.send(embed=embed)
 
         except Exception as e:
             logger.error(f"Error answering question: {e}")
-            await interaction.followup.send(
-                "😅 Sorry, I had trouble answering that. Please try again!\n\n"
-                "If this keeps happening, try rephrasing your question."
-            )
+            error_responses = [
+                "ah something went wrong, try again?",
+                "oops hit an error there, mind rephrasing?",
+                "hmm broke something, try again maybe?",
+            ]
+            await interaction.followup.send(random.choice(error_responses))
 
     def run(self):
         """Start the Discord bot."""
