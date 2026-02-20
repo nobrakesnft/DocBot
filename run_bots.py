@@ -5,18 +5,20 @@ Used for production deployment on Railway.
 
 import os
 import sys
-import asyncio
 import threading
-import signal
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 
+# Import bots at top level to avoid threading deadlock
+from connectors.telegram_bot import TelegramBot
+from connectors.discord_bot import DiscordBot
+
 
 def run_telegram_bot():
     """Run Telegram bot in a thread."""
-    from connectors.telegram_bot import TelegramBot
     print("Starting Telegram bot...")
     bot = TelegramBot()
     bot.run()
@@ -24,7 +26,6 @@ def run_telegram_bot():
 
 def run_discord_bot():
     """Run Discord bot in a thread."""
-    from connectors.discord_bot import DiscordBot
     print("Starting Discord bot...")
     bot = DiscordBot()
     bot.run()
@@ -49,14 +50,14 @@ def main():
 
     if has_telegram:
         print("Telegram token found")
-        t = threading.Thread(target=run_telegram_bot, daemon=True)
+        t = threading.Thread(target=run_telegram_bot, daemon=True, name="TelegramBot")
         threads.append(t)
     else:
         print("Telegram token not set - skipping")
 
     if has_discord:
         print("Discord token found")
-        t = threading.Thread(target=run_discord_bot, daemon=True)
+        t = threading.Thread(target=run_discord_bot, daemon=True, name="DiscordBot")
         threads.append(t)
     else:
         print("Discord token not set - skipping")
@@ -67,6 +68,7 @@ def main():
     # Start all threads
     for t in threads:
         t.start()
+        time.sleep(2)  # Stagger starts to avoid race conditions
 
     # Keep main thread alive
     try:
@@ -76,7 +78,7 @@ def main():
             if not alive:
                 print("All bots stopped!")
                 break
-            asyncio.get_event_loop().run_until_complete(asyncio.sleep(1))
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\nShutting down...")
 

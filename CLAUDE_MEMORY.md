@@ -25,12 +25,14 @@
 | Config/Environment | Done | `.env` with Groq key |
 | Document Ingester | Done | `brain/ingester.py` |
 | Vector Store | Done | `brain/vectorstore.py` (simple embeddings) |
-| LLM Answerer | Done | `brain/answerer.py` |
-| Telegram Bot | Done | `connectors/telegram_bot.py` |
-| Discord Bot | Done | `connectors/discord_bot.py` |
+| LLM Answerer | Done | `brain/answerer.py` - human-like responses |
+| Telegram Bot | Done | `connectors/telegram_bot.py` - smart detection |
+| Discord Bot | Done | `connectors/discord_bot.py` - plain text replies |
 | Multi-tenant | Done | Each server/group isolated |
+| Human-like UX | Done | Question detection, rate limiting, casual tone |
+| Shared Bot Utils | Done | `connectors/bot_utils.py` |
 | **Deployment** | **NOT DONE** | Need Railway setup |
-| **Real embeddings** | **NOT DONE** | Using simple hash (works but not optimal) |
+| **Real embeddings** | **NOT DONE** | Using simple hash (works for now) |
 | **Beta testing** | **NOT DONE** | Need real project docs |
 
 ---
@@ -124,6 +126,7 @@ DocBot/
 │
 ├── connectors/
 │   ├── __init__.py
+│   ├── bot_utils.py     # Shared utilities (rate limit, question detection)
 │   ├── telegram_bot.py  # Telegram integration
 │   └── discord_bot.py   # Discord integration
 │
@@ -136,6 +139,40 @@ DocBot/
 ---
 
 ## Session Log
+
+### Session 4 - February 15, 2026
+**What happened**:
+- Major UX overhaul to make bot feel human, not bot-like
+- Created shared `bot_utils.py` with common logic for both platforms
+- Updated system prompt to be casual and human-like
+- Removed embed replies on Discord - now uses plain text
+- Added question detection (only responds to actual questions)
+- Added rate limiting (15s cooldown per user)
+- Added ignore patterns (gm, thanks, lol, etc. don't trigger responses)
+- Added human-like typing delays
+- Removed sources from default responses
+- Raised LLM temperature to 0.7 for more natural variation
+- Both Discord and Telegram bots now share same behavior
+
+**Files changed**:
+- `connectors/bot_utils.py` (NEW) - shared utilities
+- `config.py` - new system prompt, temperature 0.7
+- `brain/answerer.py` - random responses, no sources by default
+- `connectors/discord_bot.py` - plain text, reply threading, smart detection
+- `connectors/telegram_bot.py` - smart response logic, rate limiting
+- `connectors/__init__.py` - added bot_utils export
+
+**Key behavior changes**:
+- Bot only responds to questions (not "gm", "thanks", etc.)
+- Replies to message instead of new message (Discord)
+- Short, casual responses like a community member
+- 15 second cooldown between questions per user
+- Random variation in error messages and closings
+
+**Next steps**:
+- Deploy to Railway and test live
+- Monitor community feedback on bot personality
+- Fine-tune ignore patterns based on real usage
 
 ### Session 3 - February 14, 2026
 **What happened**:
@@ -182,4 +219,4 @@ DocBot/
 
 ---
 
-*Last updated: February 14, 2026*
+*Last updated: February 15, 2026*

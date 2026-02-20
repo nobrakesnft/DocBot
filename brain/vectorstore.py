@@ -86,6 +86,30 @@ class VectorStore:
         print(f"Added {len(chunks)} documents. Total: {len(self.documents)}")
         return len(chunks)
 
+    # Related terms for query expansion (crypto-specific)
+    RELATED_TERMS = {
+        'snapshot': ['airdrop', 'eligibility', 'distribution'],
+        'airdrop': ['snapshot', 'claim', 'distribution', 'eligibility'],
+        'tge': ['token', 'launch', 'listing', 'price'],
+        'listing': ['exchange', 'cex', 'dex', 'trading'],
+        'stake': ['staking', 'apy', 'yield', 'rewards'],
+        'wen': ['when', 'date', 'timeline'],
+        'tokenomics': ['supply', 'allocation', 'vesting'],
+    }
+
+    def _expand_query(self, query: str) -> str:
+        """Expand query with related terms for better retrieval."""
+        query_lower = query.lower()
+        expanded = query
+
+        for term, related in self.RELATED_TERMS.items():
+            if term in query_lower:
+                # Add related terms to query
+                expanded = f"{query} {' '.join(related)}"
+                break
+
+        return expanded
+
     def search(self, query: str, project_id: str = "default", top_k: int = None) -> List[Dict]:
         """
         Search for relevant documents within a specific project.
@@ -106,7 +130,9 @@ class VectorStore:
         if not project_docs:
             return []
 
-        query_embedding = self._simple_embedding(query)
+        # Expand query with related terms
+        expanded_query = self._expand_query(query)
+        query_embedding = self._simple_embedding(expanded_query)
 
         results = []
         for doc in project_docs:

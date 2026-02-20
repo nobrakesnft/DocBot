@@ -89,7 +89,7 @@ I answer questions based on your project's docs, so your community gets instant 
 """
             if doc_count == 0:
                 welcome += """🚀 QUICK SETUP (Admins):
-1️⃣ Drop a file here (.txt, .md, or .pdf)
+1️⃣ /loaddoc then upload a file (.txt, .md, .pdf)
 2️⃣ Or use: /load_url https://your-docs-site.com
 
 Once docs are loaded, anyone can ask questions!
@@ -112,7 +112,7 @@ I answer questions based on project documentation.
 """
             if doc_count == 0:
                 welcome += """📄 To get started:
-• Send me a document file (.txt, .md, .pdf)
+• /loaddoc then upload a file (.txt, .md, .pdf)
 • Or use: /load_url https://docs-site.com
 • Or use: /load_text <paste your text here>
 
@@ -142,7 +142,7 @@ Type /help for all commands."""
 
 ━━━ FOR ADMINS ━━━
 📄 Adding Documentation:
-• Drop a file (.txt, .md, .pdf) in chat
+• /loaddoc - Then upload a file (.txt, .md, .pdf)
 • /load_url <link> - Load from a website
 • /load_text <text> - Add text directly
 
@@ -214,7 +214,7 @@ Need to add a new project's docs? Use /clear_docs first, then upload new files."
 
 ━━━ STEP 1: ADD YOUR DOCS ━━━
 Choose one:
-📄 Drop a file here (.txt, .md, .pdf)
+📄 /loaddoc then upload a file (.txt, .md, .pdf)
 🔗 Use: /load_url https://your-docs-site.com
 📝 Use: /load_text <paste your FAQ here>
 
@@ -406,7 +406,7 @@ Questions? Just ask!"""
             await update.message.reply_text(
                 "📭 No documents loaded yet!\n\n"
                 "To add docs:\n"
-                "• Drop a file here (.txt, .md, .pdf)\n"
+                "• /loaddoc then upload a file (.txt, .md, .pdf)\n"
                 "• Or use /load_url https://your-docs.com"
             )
             return
@@ -431,8 +431,21 @@ Questions? Just ask!"""
 
         await update.message.reply_text(message)
 
+    async def _is_admin(self, update: Update) -> bool:
+        """Check if user is admin in groups. Returns True for DMs."""
+        chat_type = update.message.chat.type
+        if chat_type in ["group", "supergroup"]:
+            user_id = update.message.from_user.id
+            member = await update.message.chat.get_member(user_id)
+            return member.status in ["administrator", "creator"]
+        return True  # DMs - user controls their own bot
+
     async def clear_docs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Clear all documents for this chat."""
+        """Clear all documents for this chat. Admin only in groups."""
+        if not await self._is_admin(update):
+            await update.message.reply_text("⚠️ Only admins can clear documents.")
+            return
+
         project_id = self._get_project_id(update.message.chat)
         doc_count = self._get_doc_count(project_id)
 
@@ -444,12 +457,16 @@ Questions? Just ask!"""
         await update.message.reply_text(
             f"🗑️ Cleared {removed} document chunks!\n\n"
             "To add new docs:\n"
-            "• Drop a file here (.txt, .md, .pdf)\n"
+            "• /loaddoc then upload a file (.txt, .md, .pdf)\n"
             "• Or use /load_url https://your-docs.com"
         )
 
     async def load_text_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Load documentation from text directly."""
+        """Load documentation from text directly. Admin only in groups."""
+        if not await self._is_admin(update):
+            await update.message.reply_text("⚠️ Only admins can add documents.")
+            return
+
         if not context.args:
             await update.message.reply_text(
                 "📝 Please provide the text to add!\n\n"
@@ -478,7 +495,11 @@ Questions? Just ask!"""
             await update.message.reply_text(f"❌ Error adding text: {e}")
 
     async def load_url_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Load documentation from a URL."""
+        """Load documentation from a URL. Admin only in groups."""
+        if not await self._is_admin(update):
+            await update.message.reply_text("⚠️ Only admins can add documents.")
+            return
+
         if not context.args:
             await update.message.reply_text(
                 "🔗 Please provide a URL!\n\n"
@@ -515,8 +536,45 @@ Questions? Just ask!"""
                 "Make sure the URL is correct and accessible."
             )
 
+    async def loaddoc_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /loaddoc command - waits for user to upload a document. Admin only in groups."""
+        if not await self._is_admin(update):
+            await update.message.reply_text("⚠️ Only admins can load documents.")
+            return
+
+        # Set waiting state for this user in this chat
+        chat_id = update.message.chat.id
+        user_id = update.message.from_user.id
+
+        if 'waiting_for_doc' not in context.bot_data:
+            context.bot_data['waiting_for_doc'] = {}
+
+        context.bot_data['waiting_for_doc'][f"{chat_id}:{user_id}"] = True
+
+        await update.message.reply_text(
+            "📄 Please upload a document now (.txt, .md, .pdf)\n\n"
+            "I'm waiting for your file..."
+        )
+
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle file uploads."""
+        """Handle document uploads - only processes if user used /loaddoc first."""
+        chat_id = update.message.chat.id
+        user_id = update.message.from_user.id
+        waiting_key = f"{chat_id}:{user_id}"
+
+        # Check if this user is waiting to upload a doc
+        waiting_for_doc = context.bot_data.get('waiting_for_doc', {})
+        if not waiting_for_doc.get(waiting_key):
+            # Not waiting - ignore the document
+            return
+
+        # Clear the waiting state
+        context.bot_data['waiting_for_doc'][waiting_key] = False
+
+        # Admin check (in case someone else uploads while admin is waiting)
+        if not await self._is_admin(update):
+            return
+
         document = update.message.document
         file_name = document.file_name.lower()
 
@@ -570,6 +628,10 @@ Questions? Just ask!"""
 
     async def reload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin command to reload documents for THIS chat."""
+        if not await self._is_admin(update):
+            await update.message.reply_text("⚠️ Only admins can reload documents.")
+            return
+
         project_id = self._get_project_id(update.message.chat)
         docs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "docs", project_id)
 
@@ -598,7 +660,11 @@ Questions? Just ask!"""
             await update.message.reply_text(f"❌ Error reloading: {e}")
 
     async def set_tone_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Set the response tone for this chat. (Admin)"""
+        """Set the response tone for this chat. Admin only in groups."""
+        if not await self._is_admin(update):
+            await update.message.reply_text("⚠️ Only admins can change the tone.")
+            return
+
         if not context.args:
             # Show current tone and options
             project_id = self._get_project_id(update.message.chat)
@@ -667,6 +733,7 @@ Questions? Just ask!"""
             BotCommand("ask", "❓ Ask a question"),
             BotCommand("status", "📊 Check bot status"),
             BotCommand("docs_info", "📄 See loaded docs"),
+            BotCommand("loaddoc", "📄 Upload a document"),
             BotCommand("load_url", "🔗 Load docs from URL"),
             BotCommand("set_tone", "🎨 Set response tone"),
             BotCommand("clear_docs", "🗑️ Clear all docs"),
@@ -709,6 +776,7 @@ Questions? Just ask!"""
         self.app.add_handler(CommandHandler("clear_docs", self.clear_docs_command))
         self.app.add_handler(CommandHandler("load_text", self.load_text_command))
         self.app.add_handler(CommandHandler("load_url", self.load_url_command))
+        self.app.add_handler(CommandHandler("loaddoc", self.loaddoc_command))
         self.app.add_handler(CommandHandler("set_tone", self.set_tone_command))
 
         # Handle regular messages
@@ -716,7 +784,7 @@ Questions? Just ask!"""
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
         )
 
-        # Handle file uploads
+        # Handle document uploads (only processes after /loaddoc)
         self.app.add_handler(
             MessageHandler(filters.Document.ALL, self.handle_document)
         )

@@ -103,7 +103,7 @@ class DiscordBot:
                 )
                 embed.add_field(
                     name="🚀 Quick Setup (Admins)",
-                    value="1️⃣ Upload a doc file (.txt, .md, .pdf)\n2️⃣ Or use `/load_url https://your-docs.com`\n\nOnce docs are loaded, anyone can ask questions!",
+                    value="1️⃣ `/loaddoc` with a file attached\n2️⃣ Or use `/load_url https://your-docs.com`\n\nOnce docs are loaded, anyone can ask questions!",
                     inline=False
                 )
                 embed.add_field(
@@ -171,13 +171,6 @@ class DiscordBot:
                 await self._answer_question(message, question, project_id)
                 bot_utils.record_question(user_id)
 
-            # Handle file uploads from admins
-            if message.attachments:
-                for attachment in message.attachments:
-                    if any(attachment.filename.lower().endswith(ext) for ext in ['.txt', '.md', '.pdf']):
-                        # Check if user is admin
-                        if message.author.guild_permissions.administrator:
-                            await self._handle_file_upload(message, attachment)
 
         # ============ SLASH COMMANDS ============
 
@@ -216,7 +209,7 @@ class DiscordBot:
                 )
                 embed.add_field(
                     name="🚀 Quick Setup (Admins)",
-                    value="1️⃣ Upload a doc file (.txt, .md, .pdf)\n2️⃣ Or use `/load_url https://your-docs.com`",
+                    value="1️⃣ `/loaddoc` with a file attached\n2️⃣ Or use `/load_url https://your-docs.com`",
                     inline=False
                 )
 
@@ -240,7 +233,7 @@ class DiscordBot:
             )
             embed.add_field(
                 name="━━━ FOR ADMINS ━━━",
-                value="**Adding Docs:**\n• Upload a file (.txt, .md, .pdf)\n• `/load_url <link>` - Load from website\n• `/load_text <text>` - Add text directly\n\n**Management:**\n• `/docs_info` - See what's loaded\n• `/clear_docs` - Start fresh",
+                value="**Adding Docs:**\n• `/loaddoc` - Upload a file (.txt, .md, .pdf)\n• `/load_url <link>` - Load from website\n• `/load_text <text>` - Add text directly\n\n**Management:**\n• `/docs_info` - See what's loaded\n• `/clear_docs` - Start fresh",
                 inline=False
             )
             embed.add_field(
@@ -285,7 +278,7 @@ class DiscordBot:
                 )
                 embed.add_field(
                     name="Step 1️⃣ Add Your Docs",
-                    value="Choose one:\n📄 Upload a file (.txt, .md, .pdf)\n🔗 `/load_url https://your-docs.com`\n📝 `/load_text <paste FAQ here>`",
+                    value="Choose one:\n📄 `/loaddoc` with a file attached\n🔗 `/load_url https://your-docs.com`\n📝 `/load_text <paste FAQ here>`",
                     inline=False
                 )
                 embed.add_field(
@@ -316,7 +309,7 @@ class DiscordBot:
             if doc_count == 0:
                 embed = discord.Embed(
                     title="📭 No Documents Loaded",
-                    description="To add docs:\n• Upload a file (.txt, .md, .pdf)\n• Or use `/load_url https://your-docs.com`",
+                    description="To add docs:\n• `/loaddoc` with a file attached\n• Or use `/load_url https://your-docs.com`",
                     color=discord.Color.yellow()
                 )
                 await interaction.response.send_message(embed=embed)
@@ -428,7 +421,7 @@ class DiscordBot:
             )
             embed.add_field(
                 name="📄 Add New Docs",
-                value="• Upload a file (.txt, .md, .pdf)\n• Or use `/load_url https://your-docs.com`",
+                value="• `/loaddoc` with a file attached\n• Or use `/load_url https://your-docs.com`",
                 inline=False
             )
 
@@ -473,6 +466,86 @@ class DiscordBot:
                 await interaction.response.send_message(
                     "❌ Invalid tone. Choose: casual, neutral, or professional"
                 )
+
+        @self.bot.tree.command(name="loaddoc", description="📄 Load a document file (.txt, .md, .pdf)")
+        @app_commands.describe(file="The document file to load (.txt, .md, .pdf)")
+        @app_commands.default_permissions(administrator=True)
+        async def loaddoc_command(interaction: discord.Interaction, file: discord.Attachment):
+            """Load a document by attaching a file to this command."""
+            # Check file extension
+            supported = ['.txt', '.md', '.pdf']
+            if not any(file.filename.lower().endswith(ext) for ext in supported):
+                await interaction.response.send_message(
+                    f"⚠️ Unsupported file format!\n\n"
+                    f"Supported: {', '.join(supported)}\n"
+                    f"You uploaded: {file.filename}",
+                    ephemeral=True
+                )
+                return
+
+            await interaction.response.defer()
+            await self._handle_file_upload_interaction(interaction, file)
+
+    async def _handle_file_upload_interaction(self, interaction: discord.Interaction, attachment):
+        """Handle file upload from a slash command/context menu interaction."""
+        project_id = self._get_project_id(interaction.guild)
+
+        # Check file extension
+        file_name = attachment.filename.lower()
+        supported = ['.txt', '.md', '.pdf']
+        if not any(file_name.endswith(ext) for ext in supported):
+            await interaction.followup.send(
+                f"⚠️ Unsupported file format!\n\n"
+                f"Supported: {', '.join(supported)}\n"
+                f"You uploaded: {attachment.filename}"
+            )
+            return
+
+        await interaction.followup.send(f"📄 Processing {attachment.filename}...")
+
+        try:
+            # Download file
+            file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "temp", attachment.filename)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(attachment.url) as resp:
+                    if resp.status == 200:
+                        with open(file_path, 'wb') as f:
+                            f.write(await resp.read())
+
+            # Load and process
+            chunks = self.ingester.load_file(file_path)
+            if chunks:
+                self.vector_store.add_documents(chunks, project_id=project_id)
+                total_docs = self._get_doc_count(project_id)
+
+                embed = discord.Embed(
+                    title="✅ Documentation Loaded!",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="📄 File", value=attachment.filename, inline=True)
+                embed.add_field(name="📥 Chunks", value=str(len(chunks)), inline=True)
+                embed.add_field(name="📊 Total", value=str(total_docs), inline=True)
+                embed.add_field(
+                    name="✅ Ready!",
+                    value="I can now answer questions about this content!\n\nTry: `/ask How do I get started?`",
+                    inline=False
+                )
+
+                await interaction.channel.send(embed=embed)
+            else:
+                await interaction.channel.send(
+                    f"⚠️ Couldn't extract content from {attachment.filename}.\n\n"
+                    "The file might be empty or in an unsupported format."
+                )
+
+            # Cleanup
+            os.remove(file_path)
+
+        except Exception as e:
+            logger.error(f"Error processing file: {e}")
+            await interaction.channel.send(f"❌ Error processing file: {e}")
 
     async def _handle_file_upload(self, message, attachment):
         """Handle file upload from message."""
